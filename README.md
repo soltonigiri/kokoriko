@@ -25,7 +25,7 @@ An evaluation model is included. Send one JSON request per line on standard inpu
 
 See the [development guide](docs/DEVELOPMENT.md) for building, testing, and training, and the [protocol](docs/PROTOCOL.md) for CLI commands.
 
-[Rules](RULES.md) · [Match testing](docs/ARENA.md) · [Evaluation models](docs/MODELS.md) · [Sources](docs/SOURCES.md)
+[Benchmarks](BENCHMARK.md) · [Rules](RULES.md) · [Match testing](docs/ARENA.md) · [Evaluation models](docs/MODELS.md) · [Sources](docs/SOURCES.md)
 
 ## License
 

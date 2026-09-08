@@ -25,7 +25,7 @@ Linux、C++20対応コンパイラ、Ninja、[uv](https://docs.astral.sh/uv/)が
 
 ビルド・テスト・学習は [開発手順](docs/DEVELOPMENT.md)、CLIの操作は [入出力仕様](docs/PROTOCOL.md) を参照してください。
 
-[ルール](RULES.md) · [比較対局](docs/ARENA.md) · [評価モデル](docs/MODELS.md) · [出典](docs/SOURCES.md)
+[ベンチマーク](BENCHMARK.md) · [ルール](RULES.md) · [比較対局](docs/ARENA.md) · [評価モデル](docs/MODELS.md) · [出典](docs/SOURCES.md)
 
 ## ライセンス
 
