@@ -1,22 +1,27 @@
 # Benchmarks
 
-An earlier KOKORIKO build (basic search, handcrafted evaluation) was tested against Komugi’s classical `battle-only-compat-v1` variant on September 8, 2026. The current public release has not yet been tested against an external engine.
+Current KOKORIKO (bundled 53-coefficient model) versus Komugi classical, tested September 9, 2026 (JST).
 
-| Games | Wins | Losses | Repetitions | Ply-limit endings | Score | 95% interval |
-| ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 200 | 61 | 5 | 131 | 3 | **64.0%** | 60.75–67.50% |
+| Time / sample | Games | Wins | Losses | Unresolved | Score | 95% interval |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 300 ms / all 100 starts | 200 | 195 | 2 | 3 | **98.25%** | 96.50–99.50% |
+| 300 ms / matched 20 starts | 40 | 39 | 1 | 0 | **97.50%** | 92.50–100.00% |
+| 5 seconds / same 20 starts | 40 | 39 | 0 | 1 | **98.75%** | 96.25–100.00% |
 
-Score is `(wins + 0.5 × unresolved games) / games`. Repetitions normally require a rematch; this test assigned half a point without replaying them. The interval uses 4,000 bootstrap resamples of paired starting positions.
+The 20 starts were fixed before the five-second trial. The matched 300 ms row is a subset of the 200-game screen. The longer trial covers only 20 starts.
 
 ## Conditions
 
-- 100 distinct positions after deployment, each played with sides swapped; seed 301000.
-- Both engines: 50 ms per move, one thread, 1 MiB transposition table, 220-ply limit.
-- Mean wall time per move: KOKORIKO 51.87 ms, Komugi variant 57.02 ms. Median completed depth was zero for both engines, so fallback moves affected play.
-- All pairs completed; zero failures. This was a screening trial. CPU model and host load were not recorded in the summary.
+- Six post-deployment opening families; sides swapped for every start. One search thread, 32 MiB tables, 220-ply limit; no failures.
+- Wins score 1; unresolved repetitions and ply-limit endings score 0.5 without replay. Intervals use 4,000 bootstrap resamples of starting-position groups. The five-second trial ended with one repetition; the full 300 ms screen had three ply-limit endings.
 
-## Scope
+| Matched sample | Mean move time, KOKORIKO / Komugi | Median depth | Depth-zero moves |
+| --- | --- | --- | --- |
+| 300 ms | 273.60 / 362.21 ms | 2 / 1 | 1 of 529 / 180 of 510 |
+| 5 seconds | 4565.25 / 5028.93 ms | 3 / 2 | 0 of 735 / 0 of 716 |
 
-The opponent came from `jwyce/komugi` at `293a0f4cd2547fb6b3d1cdeda3dab0827a73c72d`, with changes to betrayal, repetition, stalemate, insufficient-material draws, time checks, and incomplete-search handling. The adapter preserved full move history. This result applies to that modified classical engine, not unmodified Komugi or its NNUE configuration; deployment and longer time controls were not evaluated.
+Depth-zero searches return fallback moves. Equal requested time does not imply equal depth; interpret scores within the tested time control.
 
-Historical binaries, the adapter, patch, and game records are not included, so the public checkout alone cannot reproduce this trial. See [Match testing](docs/ARENA.md) for the evaluation procedure.
+The opponent is [jwyce/komugi](https://github.com/jwyce/komugi/tree/293a0f4cd2547fb6b3d1cdeda3dab0827a73c72d), adjusted for betrayal, repetition, game endings, and time handling. NNUE and deployment strength were not evaluated.
+
+Historical binaries, the adapter, and records are not distributed, so the public checkout alone cannot reproduce these results. [Match testing](docs/ARENA.md) · [Model](docs/MODELS.md)

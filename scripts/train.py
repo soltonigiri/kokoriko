@@ -13,6 +13,7 @@ import torch
 from torch import nn
 from client import atomic_json
 from resources import check_space
+from opening_families import position_types
 
 FEATURES, HIDDEN, SECOND = 6954, 256, 32
 
@@ -72,13 +73,103 @@ class Net(nn.Module):
         return self.output(x).flatten()
 
 
-def dataset(directory, limit, relative=False, residual=False, teacher_mix=0.7):
+def dataset(
+    directory,
+    limit,
+    relative=False,
+    residual=False,
+    teacher_mix=0.7,
+    split_by="opening",
+    validation_families=(),
+    validation_types=(),
+):
     train, valid = [], []
     seen_train = set()
     seen_valid = set()
     files = []
+    paths = sorted(Path(directory).glob("pair-*.json"))
+    grouped = (
+        split_by != "opening"
+        or bool(validation_families)
+        or bool(validation_types)
+        or any("source_group" in json.loads(path.read_text()) for path in paths)
+    )
+    validation_by_path = {}
+    if grouped:
+        # Connect identical/color-rotated openings and every descendant of a
+        # source game before assigning holdouts. A held-out type moves the
+        # entire source group, including its color-reversed game, to validation.
+        parents, sizes, metadata = {}, {}, []
+
+        def find(key):
+            parents.setdefault(key, key)
+            sizes.setdefault(key, 1)
+            if parents[key] != key:
+                parents[key] = find(parents[key])
+            return parents[key]
+
+        for path in paths:
+            record = json.loads(path.read_text())
+            if "error" in record:
+                continue
+            initial = {
+                k: v for k, v in record["games"][0]["initial"].items() if k != "history"
+            }
+            if relative:
+                initial = relative_position(initial)
+            opening_hash = hashlib.sha256(
+                json.dumps(initial, sort_keys=True).encode()
+            ).hexdigest()
+            family = record.get(
+                "opening_family", record.get("opening", {}).get("family")
+            )
+            if (split_by == "family" or validation_families) and not family:
+                raise ValueError(
+                    "family holdout requires opening_family on every record"
+                )
+            source = str(record.get("source_group", opening_hash))
+            keys = ["opening:" + opening_hash, "source:" + source]
+            if "source_opening" in record:
+                ancestor = {
+                    k: v for k, v in record["source_opening"].items() if k != "history"
+                }
+                if relative:
+                    ancestor = relative_position(ancestor)
+                keys.append(
+                    "opening:"
+                    + hashlib.sha256(
+                        json.dumps(ancestor, sort_keys=True).encode()
+                    ).hexdigest()
+                )
+            for key in keys[1:]:
+                a, b = find(keys[0]), find(key)
+                if a != b:
+                    if sizes[a] < sizes[b]:
+                        a, b = b, a
+                    parents[b] = a
+                    sizes[a] += sizes[b]
+            tags = {
+                tag
+                for game in record["games"]
+                for sample in game.get("samples", [])
+                for tag in sample.get(
+                    "position_types", position_types(sample["position"])
+                )
+            }
+            holdout = (
+                family in validation_families
+                if validation_families
+                else int(hashlib.sha256(str(family).encode()).hexdigest()[:8], 16) % 5
+                == 0
+                if split_by == "family"
+                else int(opening_hash[:8], 16) % 5 == 0
+            )
+            holdout |= bool(tags & set(validation_types))
+            metadata.append((path.name, "opening:" + opening_hash, holdout))
+        held = {find(key) for _, key, holdout in metadata if holdout}
+        validation_by_path = {name: find(key) in held for name, key, _ in metadata}
     # Split entire opening pairs, so color-reversed games never leak across sets.
-    for path in sorted(Path(directory).glob("pair-*.json")):
+    for path in paths:
         raw = path.read_bytes()
         record = json.loads(raw)
         if "error" in record:
@@ -91,7 +182,9 @@ def dataset(directory, limit, relative=False, residual=False, teacher_mix=0.7):
         opening_hash = hashlib.sha256(
             json.dumps(initial, sort_keys=True).encode()
         ).hexdigest()
-        validation = int(opening_hash[:8], 16) % 5 == 0
+        validation = validation_by_path.get(
+            path.name, int(opening_hash[:8], 16) % 5 == 0
+        )
         files.append(
             dict(
                 path=path.name,
@@ -100,6 +193,11 @@ def dataset(directory, limit, relative=False, residual=False, teacher_mix=0.7):
                 split="validation" if validation else "training",
             )
         )
+        if grouped:
+            files[-1]["opening_family"] = record.get(
+                "opening_family", record.get("opening", {}).get("family")
+            )
+            files[-1]["source_group"] = record.get("source_group", opening_hash)
         for gi, game in enumerate(record["games"]):
             for sample in game.get("samples", []):
                 if sample["depth"] < 1:
@@ -139,13 +237,25 @@ def dataset(directory, limit, relative=False, residual=False, teacher_mix=0.7):
         dict(
             files=files,
             split_method=(
-                "hash of relative starting position; color-rotated starts stay together"
+                "connected source/opening groups; family/type holdout"
+                if grouped
+                else "hash of relative starting position; color-rotated starts stay together"
                 if relative
                 else "hash of complete starting position; both colors and repeated starts stay together"
             ),
             overlap_positions_removed=len(overlap),
             training=len(train),
             validation=len(valid),
+            **(
+                dict(
+                    split_by=split_by,
+                    validation_families=list(validation_families),
+                    validation_types=list(validation_types),
+                    group_policy="hold out complete connected source/opening groups",
+                )
+                if grouped
+                else {}
+            ),
         ),
     )
 
@@ -225,6 +335,9 @@ def main():
     ap.add_argument("--teacher-mix", type=float, default=0.7)
     ap.add_argument("--hidden", type=int, choices=[64, 256], default=256)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--split-by", choices=["opening", "family"], default="opening")
+    ap.add_argument("--validation-family", action="append", default=[])
+    ap.add_argument("--validation-type", action="append", default=[])
     args = ap.parse_args()
     if args.residual and not args.relative:
         ap.error("residual evaluation requires relative features")
@@ -237,7 +350,14 @@ def main():
     torch.manual_seed(20260908)
     device = torch.device(args.device)
     train, valid, manifest = dataset(
-        args.data, args.limit, args.relative, args.residual, args.teacher_mix
+        args.data,
+        args.limit,
+        args.relative,
+        args.residual,
+        args.teacher_mix,
+        args.split_by,
+        args.validation_family,
+        args.validation_type,
     )
     args.out.mkdir(parents=True, exist_ok=True)
     net = Net(args.hidden).to(device)

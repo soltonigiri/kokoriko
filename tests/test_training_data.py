@@ -127,6 +127,53 @@ class TrainingDataTest(unittest.TestCase):
             )
             self.assertFalse({r[2] for r in train} & {r[2] for r in valid})
 
+    def test_family_type_and_source_holdouts_connect_all_descendants(self):
+        from train import dataset
+
+        with Engine() as e:
+            base = e.call("new")
+        with tempfile.TemporaryDirectory() as directory:
+            for i in range(6):
+                p = copy.deepcopy(base)
+                p.pop("history")
+                p["board"][54 + i] = [1]
+                p["hand"][0][0] = 0
+                sample = dict(
+                    position=p,
+                    score=0,
+                    depth=1,
+                    ply=0,
+                    position_types=["check"] if i == 2 else ["balanced"],
+                )
+                game = dict(initial=p, winner=None, samples=[sample])
+                ancestor = copy.deepcopy(p)
+                ancestor["board"][54 + i] = []
+                ancestor["board"][54] = [1]
+                atomic_json(
+                    Path(directory) / f"pair-{i:05d}.json",
+                    dict(
+                        seed=i,
+                        opening_family="flank" if i == 0 else "tower",
+                        source_group="a" if i < 2 else "b" if i < 4 else str(i),
+                        **({"source_opening": ancestor} if i == 5 else {}),
+                        games=[game, game],
+                    ),
+                )
+            train, valid, manifest = dataset(
+                directory,
+                100,
+                relative=True,
+                validation_families=["flank"],
+                validation_types=["check"],
+            )
+            self.assertEqual(
+                [f["split"] for f in manifest["files"]],
+                ["validation"] * 4 + ["training", "validation"],
+            )
+            self.assertEqual(len(train), 2)
+            self.assertEqual(len(valid), 10)
+            self.assertFalse({r[2] for r in train} & {r[2] for r in valid})
+
     def test_identical_openings_never_cross_split_even_with_different_seeds(self):
         from train import dataset
 

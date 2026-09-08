@@ -2,7 +2,7 @@
 
 Rule version: `product-advanced-2026-09-all-betrayal-v1`
 
-This engine targets the advanced rules of the 2022 commercial game. R-number references point to the [source list](docs/SOURCES.md). This document specifies the implementation; it does not constitute additional official rulings. Test names refer to checks in `tests/rules_test.cpp`.
+The engine implements the 2022 commercial game’s advanced rules. R-numbers refer to [sources](docs/SOURCES.md); rule IDs map to tests in `tests/rules_test.cpp`. Betrayal and stalemate interpretations below are engine choices, not additional official rulings.
 
 ## Board and coordinates
 
@@ -47,16 +47,13 @@ For the archer (弓), with forward represented by negative y, forward destinatio
 | `arata` | Add one reserve piece to end the turn. It must be on or behind the row of the foremost friendly top piece, on an empty square or a tower with a friendly top. It cannot go above a marshal or a three-tier tower. | R1 pp. 10–11, R3 |
 | `betrayal_all` | On the turn a tactician (謀) stacks, the player may exchange every enemy piece beneath it for matching friendly reserve pieces. Every required type and copy must be available. Declining the exchange is allowed. Dropping a tactician onto a friendly top piece also qualifies. Betrayal cannot be combined with capture. | R1 p. 13, R3; all-or-nothing exchange is this engine's interpretation |
 
-The all-or-nothing interpretation treats the Q&A's optionality as a choice of whether to perform betrayal, without extending it to selecting individual tiers. Two enemy pieces of the same type require two matching reserve pieces. Two different types require both matching pieces. When dropping a tactician, reserve that piece first, then satisfy the exchange from the remaining reserve. The same tactician cannot serve both the drop and an exchange.
+Betrayal exchanges all enemy tiers or none. Duplicate types require duplicate reserve pieces; when dropping a tactician, deduct the dropped piece before checking the exchange.
 
 ## Check and game endings
 
-`king_safety`: A marshal is in check if the opponent can capture it next. Attack detection uses enemy movement paths, blockers, and capturable tower heights without recursively generating legal moves. After applying a move, discard it if it leaves the mover's marshal under attack. Direct marshal capture is handled as a terminal event when check avoidance has already been violated, for example in an externally supplied position.
+- **Check:** discard moves that leave the marshal capturable, accounting for paths, blockers, and tower heights.
+- **Loss:** checkmate, marshal capture, or resignation. Having no legal move, including drops, also loses even without check; this stalemate rule is an engine interpretation (R1 p. 13).
+- **Repetition:** the fourth occurrence of the same board, reserves, turn, phase, and deployment rights requires a rematch (R1 p. 13). The initial position counts. It is not an automatic draw or loss.
+- **Undo:** restores the complete previous state and repetition history. Passing during battle is prohibited.
 
-`termination`: Checkmate, marshal capture, and resignation record the losing side. A side with no legal move, including drops, also loses when not in check. This is an engine interpretation with a termination reason distinct from checkmate: a player unable to advance the turn while keeping the marshal safe is treated as losing. Source: R1 p. 13 and the adopted interpretation.
-
-`repetition`: The fourth occurrence of a position with identical pieces at every tier, reserves, side to move, game phase, and deployment rights requires a rematch. The initial position counts as an occurrence. History stores position keys that support collision checking. The official rematch is not converted into an automatic draw or a loss for either side. Source: R1 p. 13; the key representation is an implementation detail.
-
-`undo`: Undo restores the board, reserves, side to move, deployment state, and repetition history to their previous values. Passing is not allowed during battle.
-
-Time controls, ply limits, and rematches after repetition belong to [match testing](docs/ARENA.md). Record them separately from the rule version's game-ending reasons.
+Time controls and ply limits belong to [match testing](docs/ARENA.md).

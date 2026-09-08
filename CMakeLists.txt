@@ -25,3 +25,7 @@ add_test(NAME rules COMMAND rules_test)
 add_executable(search_test tests/search_test.cpp)
 target_link_libraries(search_test PRIVATE gungi)
 add_test(NAME search COMMAND search_test)
+
+add_executable(network_test tests/network_test.cpp)
+target_link_libraries(network_test PRIVATE gungi)
+add_test(NAME network COMMAND network_test)

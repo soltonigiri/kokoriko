@@ -1,27 +1,34 @@
 # Match testing
 
-A pair consists of two games from the same starting position, with engine A playing side 0 in one game and side 1 in the other. The position's `first` field fixes the original first player. Both engines receive equal search time, CPU thread counts, and transposition table capacity. Executable SHA-256 hashes are saved in the configuration.
-
-Repetition is recorded as a rematch under the game rules. The test scripts do not play that rematch: repetition and games unresolved at the ply limit each receive a test score of 0.5. This score does not represent an official draw. Report wins and losses alongside repetition and ply-limit counts.
-
-Illegal moves, abnormal exits, and unresponsive games are saved as failures, and their entire pair is excluded from strength statistics. Report failures and the planned pair count together. Do not accept a candidate while a trial has failures. Save both internal search time and externally measured elapsed time so that host scheduling delays can be inspected.
-
-Keep candidate evaluation positions separate from tuning positions, and fix the pair count and configuration before starting. Report a bootstrap 95% interval over pair means. A candidate that improves in an initial 100-pair trial is checked on a separate 500-pair trial under the same conditions. A 100-pair interval that touches 50% may also justify confirmation. Accept a candidate only when every planned pair is complete and the confirmation interval's lower bound exceeds 50%. `--confirmation` requires at least 500 pairs and records the trial as a confirmation run. Small trials check integration and regressions; they do not establish that an engine is the strongest.
-
-Results are finalized as JSON one pair at a time. After interruption, rerun unfinished pairs with the same configuration. Completed pairs with game records are not counted twice. Use a new output directory if the configuration or executable changes.
-
-The default concurrency is three games. The upper limit is the smaller of six and the logical CPU count minus two, with a minimum of one. Concurrency can change during a trial while preserving completed pairs. Keep each engine's search time, thread count, and transposition table capacity unchanged, and record the reason and throughput in the experiment log. Elapsed time includes contention from other host processes.
-
-Reconstruct fixed benchmark positions, including repetition history, from tuning game records. This example runs basic search, PVS, and NNUE search for 200 ms each on six positions, checking move legality and that search leaves the position unchanged.
+A pair plays the same position with sides swapped. Give both engines equal time, search threads, and hash-table capacity; use positions excluded from training and tuning.
 
 ```bash
-.venv/bin/python scripts/bench_search.py \
-  --game artifacts/selfplay/pair-00000.json \
-  --engine build/kokoriko \
-  --model models/example/model-int.nnue --ms 200 \
-  --out artifacts/search-speed.json
+.venv/bin/python scripts/parallel_arena.py --workers 3 \
+  --a build/kokoriko --b build-baseline/kokoriko --ref build/kokoriko \
+  --model-a engine/models/default.nnue --model-b models/baseline.nnue \
+  --out artifacts/screen --pairs 100 --ms 300 --seed 81000
 ```
 
-PVS is the default. Use `--basic-a` or `--basic-b` to compare basic search. `--tuned-a` / `--tuned-b` explicitly select PVS. The comparison record saves executable SHA-256 hashes and selected arguments.
+Model loading defaults to battle only; deployment searches use handcrafted evaluation. Without model options, evaluation is handcrafted. `--standard-a --standard-b` selects the bundled model for both sides. Keep a separate baseline model when comparing versions. PVS and 32 MiB tables are defaults.
 
-Use `--selective-a` / `--selective-b` to compare selective search. This mode includes PVS and cannot be combined with `--basic-*` / `--tuned-*` for the same side.
+## Results and acceptance
+
+- Report wins, losses, repetitions, ply-limit endings, failures, and planned pairs. Repetition and limit endings score 0.5 for testing; official repetition requires a rematch.
+- Illegal moves, exits, and timeouts fail the whole pair. Failed pairs are excluded from strength statistics and block acceptance.
+- Screen on 100 pairs, then confirm on at least 500 unused pairs with `--confirmation`. Accept only after all pairs complete without failures and the 95% interval's lower bound exceeds 50%.
+- Bootstrap intervals resample independent source groups, keeping both colors and related positions together. Small runs check integration, not strength.
+
+Records include moves, timing, settings, and executable/model hashes. Rerun the same command to resume; changed inputs require a new output directory. Worker count may change without discarding completed pairs. Host contention affects elapsed time.
+
+## Other comparisons
+
+| Purpose | Options or tool |
+| --- | --- |
+| Diverse battle starts | `--opening-family mixed` or `--opening-book BOOK` |
+| Deployment | `--deployment-a search --deployment-b search --draft-start partial` |
+| Basic or selective search | `--basic-a/b` or `--selective-a/b` |
+| Search controls | `--qchecks-a/b`, `--qevasions-a/b`, `--no-score-cache-a/b`, `--no-move-cache-a/b`, `--no-exposure-order-a/b` |
+| Fixed-position timing | `bench_versions.py` at 300 ms, 1 s, and 5 s |
+| Position collection / tactics | `collect_positions.py`, `tactics.py`, `check_tactics.py` |
+
+Deployment starts `initial` and `marshal` contain only two and 162 unique positions, respectively; neither supports 500-pair confirmation. `partial` tests unfinished deployments. Search timing and teacher-based tactics are diagnostics, not substitutes for matches. See each tool's `--help` for arguments and [Benchmarks](../BENCHMARK.md) for results.

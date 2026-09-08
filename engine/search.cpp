@@ -1,5 +1,6 @@
 #include "search.hpp"
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 namespace gungi {
 namespace {
@@ -7,6 +8,9 @@ constexpr int MATE = 30000, INF = 32000;
 uint64_t mix(uint64_t a, uint64_t b) {
   a ^= b + 0x9e3779b97f4a7c15ULL + (a << 6) + (a >> 2);
   return a;
+}
+uint64_t repetition_token(uint64_t key, int count) {
+  return count ? mix(key, uint64_t(count) * 0xd6e8feb86659fd93ULL) : 0;
 }
 int store_score(int score, int ply) {
   return score > 29000 ? score + ply : score < -29000 ? score - ply : score;
@@ -22,6 +26,19 @@ int missing_king(const Position &p, int ply) {
   return 0;
 }
 } // namespace
+bool Searcher::repeated(const Position &p) const {
+  const auto it = p.history.empty() ? repetitions.end()
+                                    : repetitions.find(p.history.back());
+  const bool result = it != repetitions.end() && it->second >= 4;
+  assert(result == p.repeated());
+  return result;
+}
+void Searcher::pop_repetition(const Position &p) {
+  const auto it = repetitions.find(p.history.back());
+  assert(it != repetitions.end() && it->second > 0);
+  if (--it->second == 0)
+    repetitions.erase(it);
+}
 bool Searcher::expired() {
   if ((cancel && cancel->load()) ||
       (limits.node_limit && nodes >= limits.node_limit) ||
@@ -59,6 +76,12 @@ void Searcher::order(const Position &p, std::vector<Move> &moves,
     }
     if (m.betray)
       s += limits.tuned ? 15000 : 800;
+    if (limits.tuned && limits.exposure_order && m.from >= 0 &&
+        p.board[m.from].size > 1) {
+      const auto &tower = p.board[m.from];
+      const int exposed = tower.p[tower.size - 2];
+      s += (side(exposed) == p.turn ? 1 : -1) * value[type(exposed)] / 4;
+    }
     if (m.action == Move::Stack)
       s += 20;
     if (m.action == Move::Drop) {
@@ -85,7 +108,11 @@ void Searcher::order(const Position &p, std::vector<Move> &moves,
     moves[i] = ranked[i].second;
 }
 int Searcher::quiet(Position &p, int alpha, int beta, int ply, int remaining,
-                    bool terminal_checked) {
+                    bool terminal_checked, int check_budget, int quiet_checks) {
+  if (check_budget < 0)
+    check_budget = limits.qevasions;
+  if (quiet_checks < 0)
+    quiet_checks = limits.qchecks;
   ++nodes;
   if ((nodes & 31) == 0 && expired())
     return 0;
@@ -95,38 +122,54 @@ int Searcher::quiet(Position &p, int alpha, int beta, int ply, int remaining,
       if (end)
         return end;
     }
-    if (p.repeated())
+    if (repeated(p))
       return 0;
   }
   if (!has_legal_move(p, true))
     return -MATE + ply;
-  int stand = eval(p);
-  if (p.draft || remaining <= 0)
-    return stand;
+  if (p.draft)
+    return eval(p);
   bool check = in_check(p, p.turn);
+  // Forced evasions have a separate budget after ordinary qdepth expires.
+  // Terminal/repetition gates run before either bounded cutoff.
+  if (ply >= 72 || (remaining <= 0 && (!check || check_budget <= 0)))
+    return eval(p);
   if (!check) {
+    int stand = eval(p);
     if (stand >= beta)
       return stand;
     alpha = std::max(alpha, stand);
   }
-  auto moves = legal_moves(p, !check, true);
+  auto moves = legal_moves(p, !check && quiet_checks <= 0, true);
   order(p, moves, Move{}, ply);
   for (const auto &m : moves) {
-    if (!check && m.action != Move::Capture && !m.betray &&
+    if (!check && quiet_checks <= 0 && m.action != Move::Capture && !m.betray &&
         m.action != Move::Stack)
       continue;
     int player = p.turn;
     auto u = make_move(p, m);
-    // Include checking stacks; quiet nonchecking stacks are not tactical
-    // extensions.
-    if (!check && m.action == Move::Stack && !m.betray &&
-        !in_check(p, p.turn)) {
+    ++repetitions[p.history.back()];
+    const bool optional_check =
+        !check && m.action != Move::Capture && !m.betray;
+    // Checking routes and drops are bounded separately from forced evasions.
+    // This also includes discovered checks when a tower's top piece moves.
+    if (optional_check && !in_check(p, p.turn)) {
+      pop_repetition(p);
       undo_move(p, m, u);
       continue;
     }
+    if (observer)
+      observer(p, m, u, false);
+    const int next_budget = check_budget - int(remaining <= 0);
+    const int next_checks = std::max(0, quiet_checks - int(optional_check));
     int score = p.turn == player
-                    ? quiet(p, alpha, beta, ply + 1, remaining - 1)
-                    : -quiet(p, -beta, -alpha, ply + 1, remaining - 1);
+                    ? quiet(p, alpha, beta, ply + 1, remaining - 1, false,
+                            next_budget, next_checks)
+                    : -quiet(p, -beta, -alpha, ply + 1, remaining - 1, false,
+                             next_budget, next_checks);
+    if (observer)
+      observer(p, m, u, true);
+    pop_repetition(p);
     undo_move(p, m, u);
     if (aborted)
       return 0;
@@ -147,7 +190,7 @@ int Searcher::alpha_beta(Position &p, int depth, int alpha, int beta, int ply,
     if (end)
       return end;
   }
-  if (p.repeated())
+  if (repeated(p))
     return 0;
   if (depth <= 0)
     return quiet(p, alpha, beta, ply, limits.qdepth, true);
@@ -155,12 +198,18 @@ int Searcher::alpha_beta(Position &p, int depth, int alpha, int beta, int ply,
   Entry &slot = table[key % table.size()];
   Entry cached = slot;
   Move preferred;
-  if (cached.key == key) {
+  if (limits.reuse_moves) {
+    const auto &hint = move_table[position_hash % move_table.size()];
+    if (hint.valid && hint.key == position_hash)
+      preferred = hint.move;
+  }
+  if (cached.depth >= 0 && cached.key == key) {
     preferred = cached.move;
     if (cached.depth >= depth && ply > 0) {
       int score = load_score(cached.score, ply);
       if (cached.bound == 0 || (cached.bound == 1 && score >= beta) ||
           (cached.bound == 2 && score <= alpha)) {
+        ++score_hits;
         pv = {cached.move};
         return score;
       }
@@ -181,9 +230,14 @@ int Searcher::alpha_beta(Position &p, int depth, int alpha, int beta, int ply,
       return 0;
     int player = p.turn;
     auto u = make_move(p, m);
+    const int count = ++repetitions[p.history.back()];
+    if (observer)
+      observer(p, m, u, false);
     std::vector<Move> child;
-    uint64_t child_hash = p.hash();
-    uint64_t child_context = mix(context, child_hash);
+    uint64_t child_hash = updated_hash(p, m, u, position_hash);
+    assert(child_hash == p.hash());
+    uint64_t child_context = context ^ repetition_token(child_hash, count - 1) ^
+                             repetition_token(child_hash, count);
     auto visit = [&](int low, int high, int next_depth) {
       child.clear();
       return p.turn == player ? alpha_beta(p, next_depth, low, high, ply + 1,
@@ -204,6 +258,9 @@ int Searcher::alpha_beta(Position &p, int depth, int alpha, int beta, int ply,
       if (!aborted && score > alpha && score < beta)
         score = visit(alpha, beta, depth - 1);
     }
+    if (observer)
+      observer(p, m, u, true);
+    pop_repetition(p);
     undo_move(p, m, u);
     if (aborted)
       return 0;
@@ -227,27 +284,77 @@ int Searcher::alpha_beta(Position &p, int depth, int alpha, int beta, int ply,
       break;
     }
   }
-  slot = {key, best_move, store_score(best, ply), depth,
-          best <= original_alpha ? 2
-          : best >= beta         ? 1
-                                 : 0};
+  if ((slot.key == key && slot.depth <= depth) ||
+      (slot.key != key &&
+       (slot.generation != generation || slot.depth <= depth + 2)))
+    slot = {key,
+            best_move,
+            store_score(best, ply),
+            depth,
+            best <= original_alpha ? 2
+            : best >= beta         ? 1
+                                   : 0,
+            generation};
+  if (limits.reuse_moves)
+    move_table[position_hash % move_table.size()] = {position_hash, best_move,
+                                                     true};
   return best;
 }
+void Searcher::clear() {
+  table.clear();
+  move_table.clear();
+  killers = {};
+  history_scores = {};
+  repetitions.clear();
+  score_profile = {};
+  generation = 0;
+}
 SearchResult Searcher::run(Position p, SearchOptions options,
-                           std::atomic<bool> *stop, Evaluator evaluator) {
+                           std::atomic<bool> *stop, Evaluator evaluator,
+                           MoveObserver callback) {
   limits = options;
   cancel = stop;
   eval = std::move(evaluator);
+  observer = std::move(callback);
   nodes = 0;
+  score_hits = 0;
   killers = {};
-  history_scores = {};
+  if (!options.reuse_moves) {
+    history_scores = {};
+    move_table.clear();
+  }
+  repetitions.clear();
+  for (const auto &key : p.history)
+    ++repetitions[key];
+  for (auto &player : history_scores)
+    for (auto &origin : player)
+      for (auto &score : origin)
+        score /= 2;
   aborted = false;
   start = std::chrono::steady_clock::now();
   deadline =
       start + std::chrono::milliseconds(std::max(1, options.milliseconds));
-  table.assign(std::max<size_t>(1, size_t(std::clamp(options.hash_mb, 1, 512)) *
-                                       1024 * 1024 / sizeof(Entry)),
-               {});
+  const size_t bytes =
+      size_t(std::clamp(options.hash_mb, 1, 512)) * 1024 * 1024;
+  const size_t hint_bytes = options.reuse_moves ? bytes / 4 : 0;
+  const size_t entries =
+      std::max<size_t>(1, (bytes - hint_bytes) / sizeof(Entry));
+  const std::array<uint64_t, 8> profile{options.evaluator_tag,
+                                        uint64_t(options.qdepth),
+                                        uint64_t(options.qchecks),
+                                        uint64_t(options.tuned),
+                                        uint64_t(options.selective),
+                                        uint64_t(options.qevasions),
+                                        uint64_t(options.exposure_order),
+                                        uint64_t(options.reuse_moves)};
+  if (!options.reuse_scores || !options.evaluator_tag ||
+      profile != score_profile || table.size() != entries)
+    table.assign(entries, {});
+  score_profile = profile;
+  ++generation;
+  const size_t hints = hint_bytes / sizeof(MoveEntry);
+  if (move_table.size() != hints)
+    move_table.assign(hints, {});
   SearchResult result;
   auto moves = legal_moves(p);
   if (moves.empty()) {
@@ -257,18 +364,20 @@ SearchResult Searcher::run(Position p, SearchOptions options,
                             .count();
     return result;
   }
-  order(p, moves, Move{});
+  Move preferred;
+  const uint64_t root_hash = p.hash();
+  if (options.reuse_moves) {
+    const auto &hint = move_table[root_hash % move_table.size()];
+    if (hint.valid && hint.key == root_hash)
+      preferred = hint.move;
+  }
+  order(p, moves, preferred);
   result.move = moves.front();
   result.score = eval(p);
   result.pv = {result.move};
   uint64_t context = 0;
-  for (const auto &k : p.history) {
-    uint64_t h = 0;
-    for (unsigned char c : k)
-      h = mix(h, c);
-    context = mix(context, h);
-  }
-  const uint64_t root_hash = p.hash();
+  for (const auto &[key, count] : repetitions)
+    context ^= repetition_token(position_key_hash(key), count);
   for (int depth = 1; depth <= std::clamp(options.max_depth, 1, 64); ++depth) {
     if (expired())
       break;
@@ -286,6 +395,7 @@ SearchResult Searcher::run(Position p, SearchOptions options,
       break;
   }
   result.nodes = nodes;
+  result.score_hits = score_hits;
   result.elapsed_ms = std::chrono::duration<double, std::milli>(
                           std::chrono::steady_clock::now() - start)
                           .count();
@@ -295,8 +405,12 @@ json encode(const SearchResult &r) {
   json pv = json::array();
   for (const auto &m : r.pv)
     pv.push_back(encode(m));
-  return {{"move", encode(r.move)},     {"score", r.score},
-          {"depth", r.depth},           {"nodes", r.nodes},
-          {"elapsed_ms", r.elapsed_ms}, {"pv", pv}};
+  return {{"move", encode(r.move)},
+          {"score", r.score},
+          {"depth", r.depth},
+          {"nodes", r.nodes},
+          {"score_hits", r.score_hits},
+          {"elapsed_ms", r.elapsed_ms},
+          {"pv", pv}};
 }
 } // namespace gungi

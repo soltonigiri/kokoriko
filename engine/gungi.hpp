@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
 #include <vector>
 namespace gungi {
 using json = nlohmann::json;
@@ -85,12 +86,26 @@ std::vector<Move> legal_moves(Position &, bool tactical_only = false,
 bool has_legal_move(Position &, bool terminal_checked = false);
 Undo make_move(Position &, const Move &, bool record_history = true);
 void undo_move(Position &, const Move &, const Undo &);
+// Update a caller-owned hash after make_move. Undo restores the saved parent
+// hash; Position itself remains safe to construct or edit directly.
+uint64_t updated_hash(const Position &, const Move &, const Undo &,
+                      uint64_t parent);
+uint64_t position_key_hash(std::string_view);
 std::string
 outcome(Position &); // ongoing, checkmate, stalemate, capture, repetition
 int evaluate(const Position &); // side-to-move score, excluding terminal rules
 inline constexpr int LINEAR_FEATURES = 45;
+inline constexpr int STRATEGIC_FEATURES = 8, EXTENDED_FEATURES = 53;
+inline constexpr std::array<const char *, STRATEGIC_FEATURES> STRATEGIC_NAMES{
+    "enemy_buried_value", "exposed_support",     "king_ring_safety",
+    "safe_king_flights",  "legal_betrayal_gain", "legal_betrayal_targets",
+    "drop_space",         "frontline_drop_space"};
 std::array<int, LINEAR_FEATURES> evaluation_features(const Position &);
 std::array<int, LINEAR_FEATURES> evaluation_weights();
+std::array<int, STRATEGIC_FEATURES> strategic_features(const Position &,
+                                                       uint8_t groups = 15);
+std::array<int, EXTENDED_FEATURES> extended_features(const Position &);
+std::array<int, EXTENDED_FEATURES> extended_weights();
 json encode(const Position &);
 Position decode(const json &);
 json encode(const Move &);
