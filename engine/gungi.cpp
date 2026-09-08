@@ -6,13 +6,13 @@
 namespace gungi {
 namespace {
 bool inside(int r, int c) { return r >= 0 && r < 9 && c >= 0 && c < 9; }
-uint64_t digest(const std::string &s) {
-  uint64_t h = 1469598103934665603ULL;
-  for (unsigned char c : s) {
-    h ^= c;
-    h *= 1099511628211ULL;
-  }
-  return h;
+uint64_t hash_field(size_t index, unsigned char value) {
+  if (!value)
+    return 0;
+  uint64_t z = index * 256 + value + 0x9e3779b97f4a7c15ULL;
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+  return z ^ (z >> 31);
 }
 std::string hex(const std::string &s) {
   std::string out;
@@ -80,7 +80,41 @@ std::string Position::key() const {
   s += static_cast<char>(done[1]);
   return s;
 }
-uint64_t Position::hash() const { return digest(key()); }
+uint64_t Position::hash() const {
+  // Independent full reconstruction retained for differential verification.
+  return position_key_hash(key());
+}
+uint64_t position_key_hash(std::string_view packed) {
+  uint64_t h = 0;
+  for (size_t i = 0; i < packed.size(); ++i)
+    h ^= hash_field(i, static_cast<unsigned char>(packed[i]));
+  return h;
+}
+uint64_t updated_hash(const Position &p, const Move &m, const Undo &u,
+                      uint64_t h) {
+  auto change = [&](size_t index, int before, int after) {
+    if (before != after)
+      h ^= hash_field(index, before) ^ hash_field(index, after);
+  };
+  auto tower = [&](int square, const Tower &before) {
+    if (square < 0)
+      return;
+    const auto &after = p.board[square];
+    for (int i = 0; i < 3; ++i)
+      change(square * 3 + i, i < before.size ? before.p[i] : 0,
+             i < after.size ? after.p[i] : 0);
+  };
+  tower(m.from, u.from);
+  tower(m.to, u.to);
+  for (int k = 0; k < 14; ++k)
+    change(243 + u.turn * 14 + k, u.hand[k], p.hand[u.turn][k]);
+  change(271, u.turn, p.turn);
+  // first (272) never changes during play.
+  change(273, u.draft, p.draft);
+  change(274, u.done[0], p.done[0]);
+  change(275, u.done[1], p.done[1]);
+  return h;
+}
 bool Position::repeated() const {
   auto k = key();
   return std::count(history.begin(), history.end(), k) >= 4;
@@ -601,6 +635,141 @@ int evaluate(const Position &p) {
     }
   }
   return scores[p.turn] - scores[1 - p.turn];
+}
+std::array<int, STRATEGIC_FEATURES> strategic_features(const Position &p,
+                                                       uint8_t groups) {
+  std::array<int, STRATEGIC_FEATURES> out{};
+  if (p.draft || !groups)
+    return out;
+  constexpr int value[14] = {0,  90, 75, 42, 30, 33, 35,
+                             38, 28, 10, 34, 32, 30, 26};
+  if (groups & 1)
+    for (const auto &tower : p.board) {
+      if (tower.size < 2)
+        continue;
+      const int owner = side(tower.top()), sign = owner == p.turn ? 1 : -1;
+      for (int t = 0; t < tower.size - 1; ++t)
+        if (side(tower.p[t]) != owner)
+          out[0] += sign * value[type(tower.p[t])];
+      const int exposed = tower.p[tower.size - 2];
+      out[1] += sign * (side(exposed) == owner ? 1 : -1) * value[type(exposed)];
+    }
+  // History is irrelevant to these features; avoid copying a game's history
+  // for each legality probe.
+  Position scratch;
+  scratch.board = p.board;
+  scratch.hand = p.hand;
+  scratch.first = p.first;
+  scratch.draft = false;
+  scratch.done = p.done;
+  for (int c = 0; c < 2; ++c) {
+    const int sign = c == p.turn ? 1 : -1, king = p.marshal(c);
+    if (king < 0)
+      continue;
+    scratch.turn = c;
+    auto safe = [&](const Move &move, int next_king) {
+      auto u = make_move(scratch, move, false);
+      const bool result = !attacked(scratch, next_king, 1 - c);
+      undo_move(scratch, move, u);
+      return result;
+    };
+    if (groups & 2) {
+      for (int dr = -1; dr <= 1; ++dr)
+        for (int dc = -1; dc <= 1; ++dc) {
+          const int r = king / 9 + dr, col = king % 9 + dc;
+          if (inside(r, col) && attacked(p, r * 9 + col, 1 - c))
+            out[2] -= sign;
+        }
+      for (int to : destinations(p, king)) {
+        const auto &target = p.board[to];
+        bool flight = false;
+        if (!target.size)
+          flight = safe({king, to, -1, Move::Route}, to);
+        else {
+          if (side(target.top()) != c)
+            flight = safe({king, to, -1, Move::Capture}, to);
+          if (!flight && target.size < 3 && type(target.top()) != Marshal)
+            flight = safe({king, to, -1, Move::Stack}, to);
+        }
+        out[3] += sign * int(flight);
+      }
+    }
+    if (!(groups & 12))
+      continue;
+    int frontier = c == 0 ? 8 : 0, reserve_kinds = 0;
+    for (int q = 0; q < 81; ++q)
+      if (p.board[q].size && side(p.board[q].top()) == c)
+        frontier =
+            c == 0 ? std::min(frontier, q / 9) : std::max(frontier, q / 9);
+    for (int n : p.hand[c])
+      reserve_kinds += n > 0;
+    auto drop_square = [&](int q) {
+      const auto &t = p.board[q];
+      return (c == 0 ? q / 9 >= frontier : q / 9 <= frontier) &&
+             (!t.size ||
+              (t.size < 3 && side(t.top()) == c && type(t.top()) != Marshal));
+    };
+    std::array<bool, 81> betrayal_targets{};
+    int best_gain = 0;
+    auto betrayal = [&](const Move &move) {
+      if (!can_betray(scratch, move.to,
+                      move.action == Move::Drop ? Tactician : -1) ||
+          !safe(move, king))
+        return;
+      int gain = 0;
+      const auto &target = p.board[move.to];
+      for (int t = 0; t < target.size; ++t)
+        if (side(target.p[t]) != c)
+          gain += value[type(target.p[t])];
+      best_gain = std::max(best_gain, gain);
+      betrayal_targets[move.to] = true;
+    };
+    if ((groups & 4) && reserve_kinds) {
+      for (int from = 0; from < 81; ++from)
+        if (p.board[from].top() == piece(c, Tactician))
+          for (int to : destinations(p, from))
+            if (p.board[to].size && p.board[to].size < 3 &&
+                type(p.board[to].top()) != Marshal)
+              betrayal({from, to, -1, Move::Stack, true});
+      if (p.hand[c][Tactician])
+        for (int q = 0; q < 81; ++q)
+          if (p.board[q].size && drop_square(q))
+            betrayal({-1, q, Tactician, Move::Drop, true});
+      out[4] += sign * best_gain;
+      out[5] += sign * std::count(betrayal_targets.begin(),
+                                  betrayal_targets.end(), true);
+    }
+    if ((groups & 8) && reserve_kinds) {
+      const bool checked = in_check(p, c);
+      const int kind = int(std::find_if(p.hand[c].begin(), p.hand[c].end(),
+                                        [](int n) { return n > 0; }) -
+                           p.hand[c].begin());
+      for (int q = 0; q < 81; ++q)
+        if (drop_square(q) &&
+            (!checked || safe({-1, q, kind, Move::Drop}, king))) {
+          out[6] += sign * std::min(4, reserve_kinds);
+          if (std::abs(q / 9 - frontier) <= 1)
+            out[7] += sign;
+        }
+    }
+  }
+  return out;
+}
+std::array<int, EXTENDED_FEATURES> extended_features(const Position &p) {
+  std::array<int, EXTENDED_FEATURES> result{};
+  const auto base = evaluation_features(p);
+  const auto extra = strategic_features(p);
+  std::copy(base.begin(), base.end(), result.begin());
+  std::copy(extra.begin(), extra.end(), result.begin() + LINEAR_FEATURES);
+  return result;
+}
+std::array<int, EXTENDED_FEATURES> extended_weights() {
+  std::array<int, EXTENDED_FEATURES> result{};
+  const auto base = evaluation_weights();
+  constexpr std::array<int, STRATEGIC_FEATURES> extra{3, 1, 12, 8, 2, 6, 1, 2};
+  std::copy(base.begin(), base.end(), result.begin());
+  std::copy(extra.begin(), extra.end(), result.begin() + LINEAR_FEATURES);
+  return result;
 }
 json encode(const Move &m) {
   const char *names[] = {"move", "stack", "capture", "drop", "done"};

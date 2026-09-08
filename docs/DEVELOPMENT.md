@@ -1,15 +1,17 @@
 # Development
 
-## Build and test
+Requires Linux, a C++20 compiler, Ninja, and uv.
 
-Install Linux, a C++20 compiler, Ninja, and uv. Development dependencies are pinned in `requirements-dev.txt`; training dependencies are pinned in `requirements-train.txt`.
+## Build and test
 
 ```bash
 ./scripts/bootstrap.sh
 .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-The bootstrap script creates a Python 3.10 environment, builds in Release mode, and runs the C++ tests. Python tests cover JSON I/O, game replay, legal moves, and model consistency. Tests that require training dependencies are skipped when those dependencies are absent.
+Bootstrap creates the Python environment, builds Release, and runs C++ tests. Python tests requiring optional training packages are skipped when unavailable.
+
+For address and undefined-behavior checks:
 
 ```bash
 .venv/bin/cmake -S . -B build-sanitize -G Ninja -DCMAKE_BUILD_TYPE=Debug -DKOKORIKO_SANITIZE=ON
@@ -17,38 +19,22 @@ The bootstrap script creates a Python 3.10 environment, builds in Release mode, 
 .venv/bin/ctest --test-dir build-sanitize --output-on-failure
 ```
 
-## Self-play
+## Generate data and train
 
 ```bash
 .venv/bin/python scripts/parallel_arena.py --workers 1 \
   --a build/kokoriko --b build/kokoriko --ref build/kokoriko \
   --out artifacts/selfplay --pairs 10 --ms 50 --max-plies 220 \
   --seed 91000 --samples --explore 0.15
-```
-
-This small run checks the data generation workflow. Repeating the command resumes the run and preserves completed pairs. Use a new output directory if the configuration, executable, or model changes. See [ARENA.md](ARENA.md) for comparison conditions and acceptance criteria.
-
-The tools check free space before adding data and stop below 10 GiB. By default, they check the volume containing the repository. To check another volume, including the host volume of a virtualized environment, set `KOKORIKO_STORAGE_PATH` to a directory on that volume.
-
-## Training
-
-```bash
 uv pip install --python .venv/bin/python -r requirements-train.txt
 .venv/bin/python scripts/train.py --data artifacts/selfplay \
   --out models/example --epochs 20 --limit 10000
-.venv/bin/python scripts/train.py --data artifacts/selfplay \
-  --out models/example --epochs 30 --limit 10000 --resume
 ```
 
-Training and validation are split by starting position, with duplicate intermediate positions removed. Checkpoints retain the model, optimizer, and random states. Assess playing strength in matches from unused starting positions; training loss alone does not establish strength.
+This is a small workflow check. Rerun matches to resume completed pairs; add `--resume` to training to continue a checkpoint. Changed data, binaries, models, or settings require a new output directory. Data-writing tools stop below 10 GiB free; `KOKORIKO_STORAGE_PATH` selects the volume to check.
 
-[MODELS.md](MODELS.md) describes linear model training, NNUE formats, teacher relabeling, and data validation.
+See [Models](MODELS.md) for training choices and [Match testing](ARENA.md) for strength validation. Each Python tool provides `--help`.
 
-## Layout
+## Code
 
-- `engine/`: rules, search, evaluation models, and JSON CLI
-- `scripts/`: building, matches, training, and data validation
-- `tests/`: C++ and Python tests, with position fixtures
-- `docs/`: protocol, evaluation models, and match testing specifications
-
-External libraries are installed as dependencies. C++ JSON handling uses [nlohmann/json](https://github.com/nlohmann/json); training uses [PyTorch](https://pytorch.org/) and [NumPy](https://numpy.org/). Each dependency retains its own license.
+`engine/` contains rules, search, evaluation, and the JSON CLI; `scripts/` contains data and training tools; `tests/` contains C++ and Python checks. Dependencies are pinned in `requirements-dev.txt` and `requirements-train.txt`. External libraries retain their own licenses.

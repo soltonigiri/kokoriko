@@ -11,6 +11,13 @@ void check(bool condition, const std::string &name) {
   if (!condition)
     throw std::runtime_error(name);
 }
+Undo checked_move(Position &p, const Move &m, bool record_history = true) {
+  const uint64_t before = p.hash();
+  auto u = make_move(p, m, record_history);
+  check(updated_hash(p, m, u, before) == p.hash(),
+        "incremental hash matches packed full key");
+  return u;
+}
 Position empty() {
   Position p;
   p.draft = false;
@@ -118,7 +125,7 @@ void actions() {
   p.board[20].push(piece(0, Samurai));
   p.board[20].push(piece(1, Pawn));
   auto original = p.key();
-  auto u = make_move(p, move(40, 20, Move::Capture));
+  auto u = checked_move(p, move(40, 20, Move::Capture));
   check(p.board[20].size == 2 && p.board[20].p[0] == piece(0, Samurai) &&
             p.board[20].top() == piece(0, Shinobi),
         "capture preserves friendly order");
@@ -144,7 +151,7 @@ void actions() {
   check(has(pseudo_moves(p), move(40, 30, Move::Stack, true)) &&
             has(pseudo_moves(p), move(40, 30, Move::Stack)),
         "betrayal_all optional");
-  u = make_move(p, move(40, 30, Move::Stack, true));
+  u = checked_move(p, move(40, 30, Move::Stack, true));
   check(p.hand[0][Pawn] == 0 && p.board[30].size == 3 &&
             side(p.board[30].p[0]) == 0 && side(p.board[30].p[1]) == 0,
         "betrayal_all consumption");
@@ -178,7 +185,7 @@ void actions() {
             has(pseudo_moves(p), move(-1, 40, Move::Drop, false, Tactician)),
         "arata reserves the dropped tactician before betrayal exchange");
   auto plain = move(-1, 40, Move::Drop, false, Tactician);
-  auto reserved = make_move(p, plain);
+  auto reserved = checked_move(p, plain);
   check(p.hand[0][Tactician] == 0 && p.board[40].p[0] == piece(1, Tactician),
         "arata cannot consume one tactician twice");
   undo_move(p, plain, reserved);
@@ -190,28 +197,28 @@ void draft() {
   auto p = Position::initial();
   check(legal_moves(p).size() == 27, "draft marshal only");
   auto m = move(-1, 76, Move::Drop, false, Marshal);
-  make_move(p, m);
+  checked_move(p, m);
   check(p.turn == 1, "draft alternates");
-  make_move(p, move(-1, 4, Move::Drop, false, Marshal));
-  make_move(p, move(-1, -1, Move::Done));
+  checked_move(p, move(-1, 4, Move::Drop, false, Marshal));
+  checked_move(p, move(-1, -1, Move::Done));
   check(p.draft && p.turn == 1, "draft_done first");
-  make_move(p, move(-1, 13, Move::Drop, false, Pawn));
+  checked_move(p, move(-1, 13, Move::Drop, false, Pawn));
   check(p.turn == 1 && p.draft, "draft_done repeated second");
-  make_move(p, move(-1, -1, Move::Done));
+  checked_move(p, move(-1, -1, Move::Done));
   check(!p.draft && p.turn == 0, "draft_done battle original first");
   p.validate();
   p = Position::initial(1);
-  make_move(p, move(-1, 4, Move::Drop, false, Marshal));
-  make_move(p, move(-1, 76, Move::Drop, false, Marshal));
-  make_move(p, move(-1, 13, Move::Drop, false, Pawn));
-  make_move(p, move(-1, -1, Move::Done));
+  checked_move(p, move(-1, 4, Move::Drop, false, Marshal));
+  checked_move(p, move(-1, 76, Move::Drop, false, Marshal));
+  checked_move(p, move(-1, 13, Move::Drop, false, Pawn));
+  checked_move(p, move(-1, -1, Move::Done));
   check(!p.draft && p.turn == 1, "draft_done second before first");
   p = Position::initial();
   p.hand[0].fill(0);
   p.hand[1].fill(0);
   p.hand[0][Marshal] = p.hand[1][Marshal] = 1;
-  make_move(p, move(-1, 76, Move::Drop, false, Marshal));
-  make_move(p, move(-1, 4, Move::Drop, false, Marshal));
+  checked_move(p, move(-1, 76, Move::Drop, false, Marshal));
+  checked_move(p, move(-1, 4, Move::Drop, false, Marshal));
   check(!p.draft && p.turn == 0, "draft exhausted");
 }
 void safety() {
@@ -270,12 +277,12 @@ void restoration() {
       if (ms.empty())
         break;
       for (size_t i = 0; i < std::min<size_t>(ms.size(), 8); ++i) {
-        auto u = make_move(p, ms[i]);
+        auto u = checked_move(p, ms[i]);
         undo_move(p, ms[i], u);
         check(encode(p) == before, "undo random full state");
       }
       auto m = ms[rng() % ms.size()];
-      make_move(p, m);
+      checked_move(p, m);
       p.validate();
       check(encode(decode(encode(p))) == encode(p), "JSON roundtrip");
     }

@@ -51,6 +51,135 @@ int main() {
       throw std::runtime_error(
           "selective PVS fails independent minimax fixture");
     opt.selective = false;
+    // Identical boards with different repetition histories must not share
+    // scores, including when a Searcher retains position-only move hints across
+    // runs.
+    {
+      Position fresh = p;
+      fresh.board[58].push(piece(0, Pawn));
+      fresh.history = {fresh.key()};
+      Position nearing_draw = fresh;
+      nearing_draw.history.clear();
+      for (const auto &move : legal_moves(fresh)) {
+        auto u = make_move(fresh, move);
+        for (int i = 0; i < 3; ++i)
+          nearing_draw.history.push_back(fresh.key());
+        undo_move(fresh, move, u);
+      }
+      nearing_draw.history.push_back(nearing_draw.key());
+      auto shallow = opt;
+      shallow.max_depth = 1;
+      for (bool reuse : {false, true}) {
+        shallow.reuse_moves = reuse;
+        for (auto *position : {&fresh, &nearing_draw, &fresh}) {
+          const auto state = encode(*position);
+          const int expected = minimax(*position, 1);
+          const auto actual = search.run(*position, shallow);
+          if (actual.depth != 1 || actual.score != expected ||
+              encode(*position) != state)
+            throw std::runtime_error(
+                "history-dependent score or repetition undo mismatch");
+        }
+      }
+      if (minimax(nearing_draw, 1) != 0 || minimax(fresh, 1) == 0)
+        throw std::runtime_error("ineffective repetition fixture");
+      // Evaluator changes cannot reuse old bounds, even with the same history.
+      auto changed = search.run(fresh, shallow, nullptr,
+                                [](const Position &) { return 1234; });
+      if (changed.score != -1234)
+        throw std::runtime_error("stale evaluator score reused");
+      search.clear();
+      Searcher empty;
+      auto cleared = search.run(fresh, shallow);
+      auto cold = empty.run(fresh, shallow);
+      if (cleared.score != cold.score || cleared.move != cold.move ||
+          cleared.nodes != cold.nodes)
+        throw std::runtime_error("clear did not reset search information");
+    }
+    // Score retention requires an explicit evaluator identity. Reordering past
+    // visits preserves the fourfold-repetition context; changing counts does
+    // not.
+    {
+      Position same = p;
+      auto move = legal_moves(same).front();
+      auto u = make_move(same, move);
+      std::string other = same.key();
+      undo_move(same, move, u);
+      same.history = {other, same.key(), other, same.key()};
+      auto cached = opt;
+      cached.max_depth = 2;
+      cached.evaluator_tag = 77;
+      search.clear();
+      auto first = search.run(same, cached);
+      std::swap(same.history[0], same.history[1]);
+      auto warm = search.run(same, cached);
+      if (first.score != warm.score || warm.score_hits == 0 ||
+          warm.nodes >= first.nodes)
+        throw std::runtime_error(
+            "equivalent repetition counts failed score reuse");
+      cached.reuse_moves = false;
+      search.clear();
+      auto scores_only_cold = search.run(same, cached);
+      auto scores_only_warm = search.run(same, cached);
+      if (scores_only_warm.score != scores_only_cold.score ||
+          scores_only_warm.nodes >= scores_only_cold.nodes)
+        throw std::runtime_error(
+            "disabling move hints discarded retained scores");
+      cached.evaluator_tag = 78;
+      auto changed = search.run(same, cached, nullptr,
+                                [](const Position &) { return 1234; });
+      Searcher fresh;
+      auto reference = fresh.run(same, cached, nullptr,
+                                 [](const Position &) { return 1234; });
+      if (changed.score != reference.score)
+        throw std::runtime_error("evaluator tag failed score invalidation");
+      cached.evaluator_tag = 77;
+      same.history = {same.key()};
+      auto different = search.run(same, cached);
+      fresh.clear();
+      auto uncached = fresh.run(same, cached);
+      if (different.score != uncached.score)
+        throw std::runtime_error(
+            "changed repetition counts reused stale score");
+    }
+    // An enabled evasion budget continues checked qdepth-zero leaves.
+    {
+      Position tactical;
+      tactical.draft = false;
+      tactical.done = {true, true};
+      tactical.board[76].push(piece(0, Marshal));
+      tactical.board[4].push(piece(1, Marshal));
+      tactical.board[30].push(piece(0, General));
+      tactical.history = {tactical.key()};
+      bool checking_move = false;
+      for (const auto &move : legal_moves(tactical)) {
+        auto u = make_move(tactical, move);
+        checking_move |= in_check(tactical, tactical.turn);
+        undo_move(tactical, move, u);
+      }
+      auto shallow = opt;
+      shallow.max_depth = 1;
+      shallow.qdepth = 0;
+      int checked_evaluations = 0;
+      auto evaluator = [&](const Position &state) {
+        checked_evaluations += in_check(state, state.turn);
+        return evaluate(state);
+      };
+      shallow.qevasions = 0;
+      search.clear();
+      auto cutoff = search.run(tactical, shallow, nullptr, evaluator);
+      if (cutoff.depth != 1 || cutoff.score != minimax(tactical, 1) ||
+          checked_evaluations == 0)
+        throw std::runtime_error(
+            "zero evasion budget differs from fixed-depth minimax");
+      shallow.qevasions = 8;
+      checked_evaluations = 0;
+      search.clear();
+      auto actual = search.run(tactical, shallow, nullptr, evaluator);
+      if (!checking_move || actual.depth != 1 || checked_evaluations != 0)
+        throw std::runtime_error(
+            "qdepth zero evaluated a check before evasions");
+    }
     auto before = encode(p);
     opt.milliseconds = 5;
     opt.max_depth = 32;
