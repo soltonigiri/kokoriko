@@ -1,0 +1,2 @@
+cmake==4.4.3
+nlohmann_json==3.12.0
